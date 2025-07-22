@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import pdb
+from GCN.ConvLSTM import ConvLSTM
 
 class SGCN_LSTM(nn.Module):
     def __init__(self, AD, AD2, bias_mat_1, bias_mat_2, num_joints):
@@ -27,17 +28,61 @@ class SGCN_LSTM(nn.Module):
 
         self.lstm = nn.LSTM(input_size=16 * num_joints, hidden_size=80, num_layers=3, batch_first=True, dropout=0.25)
         self.linear = nn.Linear(80, 1)
+        
+        self.ConvLSTM = ConvLSTM(input_dim=64, hidden_dim=self.num_joints, kernel_size=(1, 1))
+
+        self.conv1 = nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(9, 1), padding=(4, 0))
+        self.dropout1 = nn.Dropout(p=0.25)
+        self.conv2 = nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(15, 1), padding=(7, 0))
+        self.dropout2 = nn.Dropout(p=0.25)
+        self.conv3 = nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(21, 1), padding=(10, 0))
+        self.dropout3 = nn.Dropout(p=0.25)
+
+
 
     def forward(self, x):
-        #pdb.set_trace()
         # x: [B, T, V, C] -> [B, C, T, V]
         x = x.permute(0, 3, 1, 2)
         residual = x
 
-        x1 = F.relu(self.temporal1(x))
-        x = torch.cat([x, x1], dim=1)
+        """Temporal convolution"""
+        k1 = F.relu(self.temporal1(x))
+        k = torch.cat([x, k1], dim=1)
 
-        x = F.relu(self.gcn_conv(x))
+        """Graph Convolution"""
+        
+        """first hop localization"""
+        x1 = F.relu(self.gcn_conv(k))
+        x1 = x1.permute(0, 2, 1, 3)
+        expand_x1 = x1.unsqueeze(3)
+        f_1 = self.ConvLSTM(expand_x1)
+        f_1 = f_1[:,:,:,0,:]
+        logits = f_1
+        coefs = F.softmax(F.leaky_relu(logits) + self.bias_mat_1, dim=-1)
+        x1 = x1.permute(0, 1, 3, 2)
+        gcn_x1 = torch.einsum('ntvw,ntwc->ntvc', coefs, x1)
+
+        """second hop localization"""
+        y1 = F.relu(self.gcn_conv(k))
+        y1 = y1.permute(0, 2, 1, 3)
+        expand_y1 = y1.unsqueeze(3)
+        f_2 = self.ConvLSTM(expand_y1)
+        f_2 = f_2[:,:,:,0,:]
+        logits = f_1 
+        coefs = F.softmax(F.leaky_relu(logits) + self.bias_mat_2, dim=-1)
+        y1 = y1.permute(0, 1, 3, 2)
+        gcn_y1 = torch.einsum('ntvw,ntwc->ntvc', coefs, y1)
+
+        gcn_1 = torch.cat([gcn_x1, gcn_y1], dim=-1)
+        pdb.set_trace()
+        
+        """Temporal convolution"""
+        z1 = self.dropout1(F.relu(self.conv1(gcn_1)))
+        z2 = self.dropout2(F.relu(self.conv2(z1)))
+        z3 = self.dropout3(F.relu(self.conv3(z2)))
+        z = torch.cat([z1, z2, z3], dim=-1)
+        '''
+        """Temporal convolution"""
         x = self.temporal2(x)
 
         # x: [B, C, T, V] -> [B, T, C*V]
@@ -48,6 +93,8 @@ class SGCN_LSTM(nn.Module):
         out = out[:, -1, :]  # last output
         out = self.linear(out)
         return out
+        '''
+        return z
 
     def train_model(self, train_x, train_y, lr=0.0001, epochs=200, batch_size=10):
         optimizer = torch.optim.Adam(self.parameters(), lr=lr)
