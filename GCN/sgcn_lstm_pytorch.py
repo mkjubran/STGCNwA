@@ -32,13 +32,13 @@ class SGCN_LSTM(nn.Module):
         self.conv3 = nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(21, 1), padding=(10, 0))
         self.dropout3 = nn.Dropout(p=0.25)
 
-        self.lstm1 = nn.LSTM(input_size=48 * num_joints, hidden_size=80, batch_first=True, dropout=0.25)
+        self.lstm1 = nn.LSTM(input_size=48 * num_joints, hidden_size=80, batch_first=True)
         self.dropout1 = nn.Dropout(p=0.25)
-        self.lstm2 = nn.LSTM(input_size=80, hidden_size=40, batch_first=True, dropout=0.25)
+        self.lstm2 = nn.LSTM(input_size=80, hidden_size=40, batch_first=True)
         self.dropout2 = nn.Dropout(p=0.25)
-        self.lstm3 = nn.LSTM(input_size=40, hidden_size=40, batch_first=True, dropout=0.25)
+        self.lstm3 = nn.LSTM(input_size=40, hidden_size=40, batch_first=True)
         self.dropout3 = nn.Dropout(p=0.25)
-        self.lstm4 = nn.LSTM(input_size=40, hidden_size=80, batch_first=True, dropout=0.25)
+        self.lstm4 = nn.LSTM(input_size=40, hidden_size=80, batch_first=True)
         self.dropout4 = nn.Dropout(p=0.25)
 
         self.fc = nn.Linear(80, 1)
