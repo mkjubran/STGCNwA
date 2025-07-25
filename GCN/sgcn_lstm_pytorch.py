@@ -43,6 +43,11 @@ class SGCN_LSTM(nn.Module):
 
         self.fc = nn.Linear(80, 1)
 
+
+        # Detect device once and store it
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.to(self.device)  # Move model to the device immediately
+
     def sgcn(self, x):
         # x: [B, T, J, C] -> [B, C, T, J]
         x = x.permute(0, 3, 1, 2)
@@ -159,6 +164,10 @@ class SGCN_LSTM(nn.Module):
         return out
 
     def train_model(self, train_x, train_y, lr=0.0001, epochs=200, batch_size=10):
+
+        train_x = train_x.to(self.device)
+        train_y = train_y.to(self.device)
+
         optimizer = torch.optim.Adam(self.parameters(), lr=lr)
         criterion = nn.HuberLoss()
 
@@ -181,5 +190,6 @@ class SGCN_LSTM(nn.Module):
 
     def predict(self, test_x):
         self.eval()
+        test_x = test_x.to(self.device)  # Move input to the same device as the model
         with torch.no_grad():
             return self.forward(test_x)
