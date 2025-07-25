@@ -32,7 +32,16 @@ class SGCN_LSTM(nn.Module):
         self.conv3 = nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(21, 1), padding=(10, 0))
         self.dropout3 = nn.Dropout(p=0.25)
 
+        self.lstm1 = nn.LSTM(input_size=48 * num_joints, hidden_size=80, batch_first=True, dropout=0.25)
+        self.lstm2 = nn.LSTM(input_size=80, hidden_size=40, batch_first=True, dropout=0.25)
+        self.lstm3 = nn.LSTM(input_size=40, hidden_size=40, batch_first=True, dropout=0.25)
+        self.lstm4 = nn.LSTM(input_size=40, hidden_size=80, batch_first=True, dropout=0.25)
 
+        self.dropout3 = nn.Dropout(p=0.25)
+        self.dropout4 = nn.Dropout(p=0.25)
+        self.dropout5 = nn.Dropout(p=0.25)
+
+        self.fc = nn.Linear(80, 1)
 
     def sgcn(self, x):
         # x: [B, T, J, C] -> [B, C, T, J]
@@ -126,28 +135,27 @@ class SGCN_LSTM(nn.Module):
 
         return z
 
+
     def forward(self, x):
-        pdb.set_trace()
         xx = self.sgcn(x)
         yy = self.sgcn(xx)
         yy = yy + xx
         zz = self.sgcn(yy)
         zz = zz + yy
-        return zz
+  
+        # LSTM
+        zz = zz.reshape(zz.shape[0], zz.shape[1], -1)  # [B, T, J*48]
+        zz, _ = self.lstm1(zz)
+        zz = self.dropout1(zz)
+        zz, _ = self.lstm2(zz)
+        zz = self.dropout2(zz)
+        zz, _ = self.lstm3(zz)
+        zz = self.dropout3(zz)
+        zz, _ = self.lstm4(zz)
+        zz = zz[:, -1, :]  # take last time step
 
-        '''
-        """Temporal convolution"""
-        x = self.temporal2(x)
-
-        # x: [B, C, T, V] -> [B, T, C*V]
-        x = x.permute(0, 2, 3, 1).contiguous()
-        x = x.view(x.shape[0], x.shape[1], -1)
-
-        out, _ = self.lstm(x)
-        out = out[:, -1, :]  # last output
-        out = self.linear(out)
+        out = self.fc(zz)
         return out
-        '''
 
     def train_model(self, train_x, train_y, lr=0.0001, epochs=200, batch_size=10):
         optimizer = torch.optim.Adam(self.parameters(), lr=lr)
