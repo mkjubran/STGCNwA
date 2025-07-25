@@ -33,13 +33,13 @@ class SGCN_LSTM(nn.Module):
         self.dropout3 = nn.Dropout(p=0.25)
 
         self.lstm1 = nn.LSTM(input_size=48 * num_joints, hidden_size=80, batch_first=True, dropout=0.25)
+        self.dropout1 = nn.Dropout(p=0.25)
         self.lstm2 = nn.LSTM(input_size=80, hidden_size=40, batch_first=True, dropout=0.25)
+        self.dropout2 = nn.Dropout(p=0.25)
         self.lstm3 = nn.LSTM(input_size=40, hidden_size=40, batch_first=True, dropout=0.25)
-        self.lstm4 = nn.LSTM(input_size=40, hidden_size=80, batch_first=True, dropout=0.25)
-
         self.dropout3 = nn.Dropout(p=0.25)
+        self.lstm4 = nn.LSTM(input_size=40, hidden_size=80, batch_first=True, dropout=0.25)
         self.dropout4 = nn.Dropout(p=0.25)
-        self.dropout5 = nn.Dropout(p=0.25)
 
         self.fc = nn.Linear(80, 1)
 
@@ -152,6 +152,7 @@ class SGCN_LSTM(nn.Module):
         zz, _ = self.lstm3(zz)
         zz = self.dropout3(zz)
         zz, _ = self.lstm4(zz)
+        zz = self.dropout4(zz)
         zz = zz[:, -1, :]  # take last time step
 
         out = self.fc(zz)
