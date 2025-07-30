@@ -94,13 +94,13 @@ class SGCN_LSTM(nn.Module):
             filename += '.npz'
             
         np.savez(filename, **data_dict)
-        print(f"Bias matrices saved to {filename}")
+        #print(f"Bias matrices saved to {filename}")
         
         # Print what was saved
-        saved_keys = list(data_dict.keys())
-        print(f"Saved matrices: {saved_keys}")
-        for key in saved_keys:
-            print(f"  {key}: shape {data_dict[key].shape}")
+        #saved_keys = list(data_dict.keys())
+        #print(f"Saved matrices: {saved_keys}")
+        #for key in saved_keys:
+        #    print(f"  {key}: shape {data_dict[key].shape}")
 
     def sgcn(self, x):
         # x: [B, T, J, C] -> [B, C, T, J]
@@ -130,6 +130,7 @@ class SGCN_LSTM(nn.Module):
         logits = f_1
         # Compute normalized attention coefficients using LeakyReLU and bias mask,
         # then apply softmax across the last dimension
+        #pdb.set_trace()
         coefs = F.softmax(F.leaky_relu(logits) + self.bias_mat_1, dim=-1)
         # x1: [B, T, C, J] -> [B, T, J, C]
         x1 = x1.permute(0, 1, 3, 2)
