@@ -7,7 +7,7 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error
 from GCN.data_processing import Data_Loader
 from GCN.graphPyTorch import get_graph_data
 #from GCN.sgcn_lstm_wA_pytorch import SGCN_LSTM
-from GCN.sgcn_lstm_parametrizedA_pytorch import SGCN_LSTM
+from GCN.sgcn_lstm_parametrizedA_wAug_pytorch import SGCN_LSTM
 
 def mean_absolute_percentage_error(y_true, y_pred):
     y_true, y_pred = np.array(y_true), np.array(y_pred)
