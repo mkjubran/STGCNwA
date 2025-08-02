@@ -478,6 +478,60 @@ class SGCN_LSTM_VAE(nn.Module):
         
         return out
     
+    def generate_augmented_dataset(self, original_x, original_y, num_augmented_per_sample=2, 
+                                 variation_scale=1.0):
+        """Generate a complete augmented dataset using VAE with joint attention
+        
+        Args:
+            original_x: Original motion data [N, T, J, C]
+            original_y: Original labels [N]
+            num_augmented_per_sample: Number of augmented samples per original sample
+            variation_scale: Scale of variation in latent space
+            
+        Returns:
+            augmented_x: Combined original + augmented data
+            augmented_y: Combined original + augmented labels
+        """
+        if not self.use_vae_augmentation or not self.vae_initialized:
+            print("VAE not initialized. Returning original data.")
+            return original_x, original_y
+        
+        self.eval()
+        augmented_x_list = [original_x]
+        augmented_y_list = [original_y]
+        
+        # Process in batches to avoid memory issues
+        batch_size = 32
+        for i in range(0, original_x.shape[0], batch_size):
+            batch_x = original_x[i:i+batch_size]
+            batch_y = original_y[i:i+batch_size]
+            
+            # Get attention scores by doing a forward pass
+            with torch.no_grad():
+                _ = self.forward(batch_x)
+                
+                # Generate augmented samples
+                augmented_batch = self.motion_vae.generate_augmented_motion(
+                    batch_x,
+                    joint_attention_scores=self.attention_scores,
+                    num_samples=num_augmented_per_sample,
+                    variation_scale=variation_scale
+                )  # [B, num_samples, T, J, C]
+                
+                # Reshape and add to lists
+                for aug_idx in range(num_augmented_per_sample):
+                    aug_x = augmented_batch[:, aug_idx, :, :, :]  # [B, T, J, C]
+                    augmented_x_list.append(aug_x)
+                    augmented_y_list.append(batch_y)  # Same labels as original
+        
+        # Combine all data
+        final_x = torch.cat(augmented_x_list, dim=0)
+        final_y = torch.cat(augmented_y_list, dim=0)
+        
+        self.train()
+        print(f"Generated augmented dataset: {original_x.shape[0]} -> {final_x.shape[0]} samples")
+        return final_x, final_y
+    
     def augment_data_with_vae(self, x, num_augmented=2, variation_scale=1.0):
         """Generate augmented data using VAE with joint-specific attention"""
         if not self.use_vae_augmentation:
@@ -497,7 +551,15 @@ class SGCN_LSTM_VAE(nn.Module):
         return augmented_samples  # [B, num_samples, T, J, C]
     
     def train_with_vae_augmentation(self, train_x, train_y, lr=0.0001, epochs=200, batch_size=10,
-                                   vae_lr=0.001, vae_weight=0.1, adv_weight=0.01):
+                                   vae_lr=0.001, vae_weight=0.1, adv_weight=0.01, 
+                                   use_augmented_data=True, num_augmented=1, augmentation_ratio=0.3):
+        """Training with VAE augmentation and adversarial loss
+        
+        Args:
+            use_augmented_data: Whether to use augmented data for main model training
+            num_augmented: Number of augmented samples per original sample
+            augmentation_ratio: Ratio of batches that use augmented data (0.0-1.0)
+        """
         """Training with VAE augmentation and adversarial loss"""
         train_x = train_x.to(self.device)
         train_y = train_y.to(self.device)
@@ -602,7 +664,16 @@ class SGCN_LSTM_VAE(nn.Module):
                 
                 losses.append(main_loss.item())
             
-            if self.use_vae_augmentation and len(vae_losses) > 0:
+            # Print training progress (inside epoch loop)
+            if use_augmented_data and len(augmented_losses) > 0:
+                avg_aug_loss = np.mean(augmented_losses)
+                if self.use_vae_augmentation and len(vae_losses) > 0:
+                    print(f"Epoch {epoch+1}/{epochs}, Main Loss: {np.mean(losses):.4f}, "
+                          f"Augmented Loss: {avg_aug_loss:.4f}, VAE Loss: {np.mean(vae_losses):.4f}")
+                else:
+                    print(f"Epoch {epoch+1}/{epochs}, Main Loss: {np.mean(losses):.4f}, "
+                          f"Augmented Loss: {avg_aug_loss:.4f}")
+            elif self.use_vae_augmentation and len(vae_losses) > 0:
                 print(f"Epoch {epoch+1}/{epochs}, Main Loss: {np.mean(losses):.4f}, VAE Loss: {np.mean(vae_losses):.4f}")
             else:
                 print(f"Epoch {epoch+1}/{epochs}, Loss: {np.mean(losses):.4f}")
