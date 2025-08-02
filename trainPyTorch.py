@@ -7,7 +7,7 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error
 from GCN.data_processing import Data_Loader
 from GCN.graphPyTorch import get_graph_data
 #from GCN.sgcn_lstm_wA_pytorch import SGCN_LSTM
-from GCN.sgcn_lstm_parametrizedA_wAug_pytorch import SGCN_LSTM
+from GCN.sgcn_lstm_parametrizedA_wVAE_pytorch import SGCN_LSTM_VAE
 
 def mean_absolute_percentage_error(y_true, y_pred):
     y_true, y_pred = np.array(y_true), np.array(y_pred)
@@ -18,6 +18,11 @@ parser.add_argument('--ex', type=str, required=True, help='Exercise name (e.g., 
 parser.add_argument('--lr', type=float, default=0.0001, help='Learning rate')
 parser.add_argument('--epoch', type=int, default=1000, help='Number of training epochs')
 parser.add_argument('--batch_size', type=int, default=10, help='Batch size')
+parser.add_argument('--use_augmentation', action='store_true', 
+                   help='Enable data augmentation during training')
+parser.add_argument('--aug_probability', type=float, default=0.5,
+                   help='Probability of applying augmentation to each sample')
+
 args = parser.parse_args()
 
 # Load and split dataset
@@ -37,11 +42,15 @@ num_nodes = len(data_loader.body_part)
 AD, AD2, bias_mat_1, bias_mat_2 = get_graph_data(num_nodes)
 
 # Initialize model
-model = SGCN_LSTM(AD, AD2, bias_mat_1, bias_mat_2, num_joints=num_nodes)
+#model = SGCN_LSTM(AD, AD2, bias_mat_1, bias_mat_2, num_joints=num_nodes)
+#opposite_points=[];
+#model = SGCN_LSTM(AD, AD2, bias_mat_1, bias_mat_2, num_joints=num_nodes, opposite_points=opposite_points, enable_augmentation=args.use_augmentation)
+model = SGCN_LSTM_VAE(AD, AD2, bias_mat_1, bias_mat_2, num_joints=num_nodes, use_vae_augmentation=True)
 
 # Train
 #model.train_model(train_x, train_y, lr=args.lr, epochs=args.epoch, batch_size=args.batch_size, ex_path=args.ex)
-model.train_model(train_x, train_y, lr=args.lr, epochs=args.epoch, batch_size=args.batch_size)
+#model.train_model(train_x, train_y, lr=args.lr, epochs=args.epoch, batch_size=args.batch_size, augmentation_prob=args.aug_probability)
+model.train_with_vae_augmentation(train_x, train_y, epochs=args.epoch)
 
 # Predict
 y_pred = model.predict(test_x).detach().cpu().numpy()

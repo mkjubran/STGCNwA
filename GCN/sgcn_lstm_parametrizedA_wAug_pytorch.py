@@ -1,288 +1,339 @@
-import argparse
-import numpy as np
 import torch
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error, mean_absolute_error
-from GCN.data_processing import Data_Loader
-from GCN.graphPyTorch import get_graph_data
-from GCN.sgcn_lstm_parametrizedA_pytorch import SGCN_LSTM
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import pdb
+from GCN.ConvLSTM import ConvLSTM
 import skelbumentations as S
-from torch.utils.data import Dataset, DataLoader
-import random
 
-def mean_absolute_percentage_error(y_true, y_pred):
-    y_true, y_pred = np.array(y_true), np.array(y_pred)
-    return np.mean(np.abs((y_true - y_pred) / y_true)) * 100
-
-class SkeletonDataset(Dataset):
-    """Custom dataset class for skeleton data with augmentation support"""
-    def __init__(self, X, y, augment_transform=None, augment_probability=0.5):
-        self.X = X
-        self.y = y
-        self.augment_transform = augment_transform
-        self.augment_probability = augment_probability
+class ParameterizedAttention(nn.Module):
+    """Parameterized attention mechanism with learnable parameters"""
+    def __init__(self, feature_dim, num_joints, hidden_dim=64):
+        super(ParameterizedAttention, self).__init__()
+        self.feature_dim = feature_dim
+        self.num_joints = num_joints
+        self.hidden_dim = hidden_dim
         
-    def __len__(self):
-        return len(self.X)
+        # Learnable attention parameters
+        self.W_q = nn.Linear(feature_dim, hidden_dim)  # Query projection
+        self.W_k = nn.Linear(feature_dim, hidden_dim)  # Key projection
+        self.W_v = nn.Linear(feature_dim, feature_dim)  # Value projection
+        
+        # Additional learnable parameters for attention scoring
+        self.attention_weights = nn.Parameter(torch.randn(hidden_dim, num_joints))
+        self.bias = nn.Parameter(torch.zeros(num_joints))
+        
+        # Normalization
+        self.layer_norm = nn.LayerNorm(feature_dim)
+        self.dropout = nn.Dropout(0.1)
+        
+    def forward(self, x, bias_mat):
+        """
+        Args:
+            x: [B, T, J, C] - input features
+            bias_mat: [J, J] - adjacency bias matrix
+        Returns:
+            attended_features: [B, T, J, C]
+        """
+        B, T, J, C = x.shape
+        
+        # Project to query, key, value
+        q = self.W_q(x)  # [B, T, J, hidden_dim]
+        k = self.W_k(x)  # [B, T, J, hidden_dim]
+        v = self.W_v(x)  # [B, T, J, C]
+        
+        # Compute attention scores using parameterized approach
+        # Method 1: Dot-product attention with learnable weights
+        attention_scores = torch.einsum('btjh,hk->btjk', q, self.attention_weights)  # [B, T, J, J]
+        attention_scores = attention_scores + self.bias.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+        
+        # Method 2: Additional scaled dot-product attention
+        scale = (self.hidden_dim ** -0.5)
+        dot_product_scores = torch.einsum('btjh,btkh->btjk', q, k) * scale  # [B, T, J, J]
+        
+        # Combine both attention mechanisms
+        combined_scores = attention_scores + dot_product_scores
+        
+        # Apply bias matrix (adjacency information)
+        combined_scores = combined_scores + bias_mat.unsqueeze(0).unsqueeze(0)
+        
+        # Apply softmax to get attention coefficients
+        attention_coefs = F.softmax(combined_scores, dim=-1)  # [B, T, J, J]
+        attention_coefs = self.dropout(attention_coefs)
+        
+        # Apply attention to values
+        attended_features = torch.einsum('btjk,btkc->btjc', attention_coefs, v)  # [B, T, J, C]
+        
+        # Residual connection and layer normalization
+        attended_features = self.layer_norm(attended_features + x)
+        
+        return attended_features
+
+class SGCN_LSTM(nn.Module):
+    def __init__(self, AD, AD2, bias_mat_1, bias_mat_2, num_joints, opposite_points=None, enable_augmentation=True):
+        super(SGCN_LSTM, self).__init__()
+        self.AD = AD
+        self.AD2 = AD2
+        self.bias_mat_1 = bias_mat_1
+        self.bias_mat_2 = bias_mat_2
+        self.num_joints = num_joints
+        self.enable_augmentation = enable_augmentation
+        
+        # Temporal convolution layers
+        self.temporal3C = nn.Conv2d(in_channels=3, out_channels=64, kernel_size=(9, 1), padding=(4, 0))
+        self.gcn_conv67C = nn.Conv2d(64 + 3, 64, kernel_size=(1, 1))
+        self.temporal48C = nn.Conv2d(in_channels=48, out_channels=64, kernel_size=(9, 1), padding=(4, 0))
+        self.gcn_conv112C = nn.Conv2d(64 + 48, 64, kernel_size=(1, 1))
+        
+        # Parameterized attention mechanisms
+        self.attention_1 = ParameterizedAttention(feature_dim=64, num_joints=num_joints, hidden_dim=32)
+        self.attention_2 = ParameterizedAttention(feature_dim=64, num_joints=num_joints, hidden_dim=32)
+        
+        # ConvLSTM (keeping original for comparison/fallback)
+        self.ConvLSTM = ConvLSTM(input_dim=64, hidden_dim=self.num_joints, kernel_size=(1, 1))
+        
+        # Temporal processing layers
+        self.conv1 = nn.Conv2d(in_channels=128, out_channels=16, kernel_size=(9,1), padding=(4,0))
+        self.dropout1 = nn.Dropout(p=0.25)
+        self.conv2 = nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(15, 1), padding=(7, 0))
+        self.dropout2 = nn.Dropout(p=0.25)
+        self.conv3 = nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(21, 1), padding=(10, 0))
+        self.dropout3 = nn.Dropout(p=0.25)
+        self.dropout4 = nn.Dropout(p=0.25)
+        
+        # LSTM layers
+        self.lstm1 = nn.LSTM(input_size=48 * num_joints, hidden_size=80, batch_first=True)
+        self.lstm2 = nn.LSTM(input_size=80, hidden_size=40, batch_first=True)
+        self.lstm3 = nn.LSTM(input_size=40, hidden_size=40, batch_first=True)
+        self.lstm4 = nn.LSTM(input_size=40, hidden_size=80, batch_first=True)
+        
+        # Final layers
+        self.fc = nn.Linear(80, 1)
+        
+        # Initialize augmentation pipeline
+        self._setup_augmentation(opposite_points)
+        
+        # Device setup
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.to(self.device)
     
-    def __getitem__(self, idx):
-        x_sample = self.X[idx]  # Shape: [T, J, C]
-        y_sample = self.y[idx]
+    def _setup_augmentation(self, opposite_points):
+        """Setup skelbumentations augmentation pipeline"""
+        if not self.enable_augmentation:
+            self.augment_pipeline = None
+            return
+            
+        # Create augmentation pipeline
+        augmentation_transforms = [
+            S.SelectFrames(
+                [
+                    S.RandomOcclusion(chance=0.4)
+                ], 
+                frames=[3, 4, 5]
+            ),
+            S.SelectHighMovement(
+                [
+                    S.WholeOcclusion()
+                ], 
+            ),
+            S.SelectRandomFrames(
+                [
+                    S.OneOf([
+                        S.SwapPerturbation(),
+                        S.MirrorPerturbation(opposite_points=opposite_points) if opposite_points is not None else S.SwapPerturbation(),
+                    ])
+                ],
+                min_num=5,
+                max_num=10,
+            ),
+            S.MovePerturbation(variance=0.1),
+        ]
         
-        # Apply augmentation with given probability
-        if self.augment_transform is not None and random.random() < self.augment_probability:
+        # Remove MirrorPerturbation if opposite_points is None
+        if opposite_points is None:
+            augmentation_transforms[2] = S.SelectRandomFrames(
+                [S.SwapPerturbation()],
+                min_num=5,
+                max_num=10,
+            )
+        
+        self.augment_pipeline = S.Compose(augmentation_transforms)
+    
+    def apply_augmentation(self, keypoints):
+        """
+        Apply augmentation to keypoint sequences
+        Args:
+            keypoints: Input keypoints tensor [B, T, J, C]
+        Returns:
+            augmented_keypoints: Augmented keypoints tensor [B, T, J, C]
+        """
+        if not self.enable_augmentation or self.augment_pipeline is None or not self.training:
+            return keypoints
+        
+        # Convert tensor to numpy for skelbumentations
+        keypoints_np = keypoints.detach().cpu().numpy()
+        batch_size = keypoints_np.shape[0]
+        augmented_batch = []
+        
+        for i in range(batch_size):
+            # Apply augmentation to each sample in the batch
             try:
-                # Convert to format expected by skelbumentation: [T, J, C]
-                keypoints = x_sample.numpy() if isinstance(x_sample, torch.Tensor) else x_sample
-                
-                # Apply augmentation
-                augmented = self.augment_transform(keypoints=keypoints)
+                augmented = self.augment_pipeline(keypoints=keypoints_np[i])
                 augmented_keypoints = augmented["keypoints"]
-                
-                # Convert back to tensor
-                x_sample = torch.tensor(augmented_keypoints, dtype=torch.float32)
+                augmented_batch.append(augmented_keypoints)
             except Exception as e:
-                print(f"Warning: Augmentation failed for sample {idx}: {e}")
-                # Fall back to original data
-                pass
+                # If augmentation fails, use original keypoints
+                print(f"Augmentation failed for sample {i}: {e}")
+                augmented_batch.append(keypoints_np[i])
         
-        return x_sample, y_sample
-
-def create_augmentation_pipeline(num_joints):
-    """Create skelbumentation augmentation pipeline"""
-    
-    # Define opposite points for mirror perturbation (skeleton-specific)
-    # This is a basic example - you should adjust based on your skeleton structure
-    opposite_points = [
-        # Left-Right shoulder pairs
-        (4, 8),   # Left shoulder - Right shoulder (adjust indices based on your skeleton)
-        (5, 9),   # Left elbow - Right elbow
-        (6, 10),  # Left wrist - Right wrist
-        (7, 11),  # Left hand - Right hand
-        (12, 16), # Left hip - Right hip
-        (13, 17), # Left knee - Right knee
-        (14, 18), # Left ankle - Right ankle
-        (15, 19), # Left foot - Right foot
-        # Add more pairs as needed based on your skeleton structure
-    ]
-    
-    # Filter opposite_points to only include valid joint indices
-    valid_opposite_points = [(i, j) for i, j in opposite_points 
-                           if i < num_joints and j < num_joints]
-    
-    augment_pipeline = S.Compose([
-        # Randomly select frames for augmentation
-        S.SelectRandomFrames(
-            [
-                S.OneOf([
-                    S.SwapPerturbation(prob=0.3),
-                    S.MirrorPerturbation(
-                        opposite_points=valid_opposite_points, 
-                        prob=0.3
-                    ) if valid_opposite_points else S.SwapPerturbation(prob=0.3),
-                ])
-            ],
-            min_num=3,
-            max_num=8,
-        ),
-        # Movement perturbation
-        S.MovePerturbation(variance=0.05, prob=0.4),
+        # Convert back to tensor
+        augmented_batch = np.stack(augmented_batch, axis=0)
+        return torch.tensor(augmented_batch, dtype=keypoints.dtype, device=keypoints.device)
         
-        # Joint-wise perturbations
-        S.JointPerturbation(variance=0.02, prob=0.3),
+    def sgcn(self, x):
+        # x: [B, T, J, C] -> [B, C, T, J]
+        x = x.permute(0, 3, 1, 2)
+        residual = x
         
-        # Scale perturbation
-        S.ScalePerturbation(variance=0.1, prob=0.2),
-    ])
-    
-    return augment_pipeline
-
-def create_conservative_augmentation_pipeline():
-    """Create a more conservative augmentation pipeline for regression tasks"""
-    
-    augment_pipeline = S.Compose([
-        # Light movement perturbation
-        S.MovePerturbation(variance=0.02, prob=0.4),
+        """Temporal convolution across T in [B, C, T, J]"""
+        if x.shape[1] == 3: #C=3
+           k1 = F.relu(self.temporal3C(x))
+        else: #C=48
+           k1 = F.relu(self.temporal48C(x))
+        k = torch.cat([x, k1], dim=1)
         
-        # Small joint perturbations
-        S.JointPerturbation(variance=0.01, prob=0.3),
+        """Graph Convolution with Parameterized Attention"""
+        """First hop localization - neighbour joints (bias_mat_1)"""
+        if k.shape[1] == 67: #C=64+3
+           x1 = F.relu(self.gcn_conv67C(k))
+        else: #C=64+48
+           x1 = F.relu(self.gcn_conv112C(k))
         
-        # Minor scale changes
-        S.ScalePerturbation(variance=0.05, prob=0.2),
-    ])
-    
-    return augment_pipeline
-
-def enhanced_train_model(model, train_dataset, val_x, val_y, device, lr=0.0001, epochs=200, batch_size=10):
-    """Enhanced training function with data augmentation support"""
-    
-    model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = torch.nn.HuberLoss()
-    
-    # Create data loader
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
-    
-    model.train()
-    for epoch in range(epochs):
-        total_loss = 0
-        num_batches = 0
+        # x1: [B, C, T, J] -> [B, T, J, C]
+        x1 = x1.permute(0, 2, 3, 1)
         
-        for batch_x, batch_y in train_loader:
-            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+        # Apply parameterized attention for first hop
+        gcn_x1 = self.attention_1(x1, self.bias_mat_1)  # [B, T, J, C]
+        
+        """Second hop localization - neighbour of neighbour joints (bias_mat_2)"""
+        if k.shape[1] == 67: #C=64+3
+            y1 = F.relu(self.gcn_conv67C(k))
+        else: #C=64+48
+            y1 = F.relu(self.gcn_conv112C(k))
+        
+        # y1: [B, C, T, J] -> [B, T, J, C]
+        y1 = y1.permute(0, 2, 3, 1)
+        
+        # Apply parameterized attention for second hop
+        gcn_y1 = self.attention_2(y1, self.bias_mat_2)  # [B, T, J, C]
+        
+        # Concatenate attention-weighted aggregation of features across joints from
+        # first and second hop localizations
+        gcn_1 = torch.cat([gcn_x1, gcn_y1], dim=-1)  # [B, T, J, 2*C]
+        
+        """Temporal convolution"""
+        # gcn_1: [B, T, J, 2*C] -> [B*T, J, 2*C]
+        gcn_1 = gcn_1.view(-1, gcn_1.shape[2], gcn_1.shape[3])
+        # gcn_1: [B*T, J, 2*C] -> [B*T, 2*C, J, 1]
+        gcn_1 = gcn_1.permute(0, 2, 1).unsqueeze(3)
+        
+        # Temporal convolution layers
+        z1 = self.dropout1(F.relu(self.conv1(gcn_1)))  # [B*T, 16, J, 1]
+        z2 = self.dropout2(F.relu(self.conv2(z1)))     # [B*T, 16, J, 1]
+        z3 = self.dropout3(F.relu(self.conv3(z2)))     # [B*T, 16, J, 1]
+        
+        # Concatenate temporal features
+        z_concat = torch.cat([z1, z2, z3], dim=1)  # [B*T, 48, J, 1]
+        
+        # Reshape back to [B, T, J, 48]
+        z = z_concat.reshape(x.shape[0], x.shape[2], 48, x.shape[3])
+        z = z.permute(0, 1, 3, 2)  # [B, T, J, 48]
+        
+        return z
+    
+    def forward(self, x):
+        # Apply augmentation during training
+        if self.training and self.enable_augmentation:
+            x = self.apply_augmentation(x)
+        
+        xx = self.sgcn(x)
+        yy = self.sgcn(xx)
+        yy = yy + xx  # Residual connection
+        zz = self.sgcn(yy)
+        zz = zz + yy  # Residual connection
+  
+        # LSTM processing
+        zz = zz.reshape(zz.shape[0], zz.shape[1], -1)  # [B, T, J*48]
+        zz, _ = self.lstm1(zz)
+        zz = self.dropout1(zz)
+        zz, _ = self.lstm2(zz)
+        zz = self.dropout2(zz)
+        zz, _ = self.lstm3(zz)
+        zz = self.dropout3(zz)
+        zz, _ = self.lstm4(zz)
+        zz = self.dropout4(zz)
+        
+        # Take last time step and apply final linear layer
+        zz = zz[:, -1, :]  # [B, 80]
+        out = self.fc(zz)   # [B, 1]
+        
+        return out
+    
+    def set_augmentation(self, enable):
+        """Enable or disable augmentation"""
+        self.enable_augmentation = enable
+    
+    def train_model(self, train_x, train_y, lr=0.0001, epochs=200, batch_size=10, augmentation_prob=0.5):
+        train_x = train_x.to(self.device)
+        train_y = train_y.to(self.device)
+        optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+        criterion = nn.HuberLoss()
+        self.train()
+        
+        for epoch in range(epochs):
+            permutation = torch.randperm(train_x.size(0))
+            losses = []
             
-            optimizer.zero_grad()
-            output = model(batch_x)
-            loss = criterion(output.squeeze(), batch_y.squeeze())
-            loss.backward()
-            optimizer.step()
-            
-            total_loss += loss.item()
-            num_batches += 1
+            for i in range(0, train_x.size(0), batch_size):
+                indices = permutation[i:i+batch_size]
+                batch_x, batch_y = train_x[indices], train_y[indices]
+                
+                # Randomly decide whether to apply augmentation for this batch
+                if self.enable_augmentation and np.random.random() < augmentation_prob:
+                    self.set_augmentation(True)
+                else:
+                    self.set_augmentation(False)
+                
+                optimizer.zero_grad()
+                output = self.forward(batch_x)
+                loss = criterion(output.squeeze(), batch_y.squeeze())
+                loss.backward()
+                optimizer.step()
+                losses.append(loss.item())
+                
+            print(f"Epoch {epoch+1}/{epochs}, Loss: {np.mean(losses):.4f}")
         
-        avg_loss = total_loss / num_batches
+        # Re-enable augmentation after training
+        self.set_augmentation(True)
+    
+    def predict(self, test_x):
+        self.eval()
+        # Disable augmentation during inference
+        original_aug_state = self.enable_augmentation
+        self.set_augmentation(False)
         
-        # Validation every 50 epochs
-        if (epoch + 1) % 50 == 0:
-            model.eval()
-            with torch.no_grad():
-                val_pred = model(val_x.to(device))
-                val_loss = criterion(val_pred.squeeze(), val_y.to(device).squeeze())
-            model.train()
-            print(f"Epoch {epoch+1}/{epochs}, Train Loss: {avg_loss:.6f}, Val Loss: {val_loss.item():.6f}")
-        else:
-            print(f"Epoch {epoch+1}/{epochs}, Train Loss: {avg_loss:.6f}")
+        test_x = test_x.to(self.device)
+        with torch.no_grad():
+            result = self.forward(test_x)
+        
+        # Restore original augmentation state
+        self.set_augmentation(original_aug_state)
+        return result
 
-def main():
-    parser = argparse.ArgumentParser(description='PyTorch ST-GCN Trainer with Data Augmentation')
-    parser.add_argument('--ex', type=str, required=True, help='Exercise name (e.g., Kimore_ex5)')
-    parser.add_argument('--lr', type=float, default=0.0001, help='Learning rate')
-    parser.add_argument('--epoch', type=int, default=1000, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=10, help='Batch size')
-    
-    # Data augmentation arguments
-    parser.add_argument('--use_augmentation', action='store_true', 
-                       help='Enable data augmentation during training')
-    parser.add_argument('--aug_probability', type=float, default=0.5,
-                       help='Probability of applying augmentation to each sample')
-    parser.add_argument('--aug_type', choices=['conservative', 'standard'], default='conservative',
-                       help='Type of augmentation pipeline: conservative (small changes) or standard')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
-    
-    args = parser.parse_args()
-    
-    # Set random seeds for reproducibility
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    random.seed(args.seed)
-    
-    print(f"Training configuration:")
-    print(f"  Exercise: {args.ex}")
-    print(f"  Learning rate: {args.lr}")
-    print(f"  Epochs: {args.epoch}")
-    print(f"  Batch size: {args.batch_size}")
-    print(f"  Data augmentation: {args.use_augmentation}")
-    if args.use_augmentation:
-        print(f"  Augmentation probability: {args.aug_probability}")
-        print(f"  Augmentation type: {args.aug_type}")
-    
-    # Load and split dataset
-    print("Loading dataset...")
-    data_loader = Data_Loader(args.ex)
-    train_x, test_x, train_y, test_y = train_test_split(
-        data_loader.scaled_x, data_loader.scaled_y, test_size=0.2, random_state=args.seed
-    )
-    
-    # Convert to torch tensors
-    train_x = torch.tensor(train_x, dtype=torch.float32)
-    train_y = torch.tensor(train_y, dtype=torch.float32)
-    test_x = torch.tensor(test_x, dtype=torch.float32)
-    test_y = torch.tensor(test_y, dtype=torch.float32)
-    
-    print(f"Dataset shapes:")
-    print(f"  Train X: {train_x.shape}")  # [B, T, J, C]
-    print(f"  Train Y: {train_y.shape}")
-    print(f"  Test X: {test_x.shape}")
-    print(f"  Test Y: {test_y.shape}")
-    
-    # Create augmentation pipeline
-    augment_transform = None
-    if args.use_augmentation:
-        print("Setting up data augmentation...")
-        num_joints = len(data_loader.body_part)
-        
-        try:
-            if args.aug_type == 'conservative':
-                augment_transform = create_conservative_augmentation_pipeline()
-                print("Using conservative augmentation pipeline")
-            else:
-                augment_transform = create_augmentation_pipeline(num_joints)
-                print("Using standard augmentation pipeline")
-        except Exception as e:
-            print(f"Warning: Could not create augmentation pipeline: {e}")
-            print("Proceeding without augmentation...")
-            augment_transform = None
-            args.use_augmentation = False
-    
-    # Create dataset with augmentation
-    train_dataset = SkeletonDataset(
-        train_x, train_y, 
-        augment_transform=augment_transform,
-        augment_probability=args.aug_probability if args.use_augmentation else 0.0
-    )
-    
-    # Get graph data
-    num_nodes = len(data_loader.body_part)
-    AD, AD2, bias_mat_1, bias_mat_2 = get_graph_data(num_nodes)
-    
-    # Initialize model
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-    
-    model = SGCN_LSTM(AD, AD2, bias_mat_1, bias_mat_2, num_joints=num_nodes)
-    
-    # Train with augmentation support
-    print("Starting training...")
-    if args.use_augmentation:
-        # Use enhanced training function that supports augmented dataset
-        enhanced_train_model(
-            model, train_dataset, test_x, test_y, device,
-            lr=args.lr, epochs=args.epoch, batch_size=args.batch_size
-        )
-    else:
-        # Use original training method
-        model.train_model(train_x, train_y, lr=args.lr, epochs=args.epoch, batch_size=args.batch_size)
-    
-    # Predict
-    print("Evaluating model...")
-    y_pred = model.predict(test_x).detach().cpu().numpy()
-    test_y_np = test_y.detach().cpu().numpy()
-    
-    # Inverse transform predictions and targets
-    y_pred = data_loader.sc2.inverse_transform(y_pred)
-    test_y_np = data_loader.sc2.inverse_transform(test_y_np)
-    
-    # Calculate metrics
-    mae = mean_absolute_error(test_y_np, y_pred)
-    mse = mean_squared_error(test_y_np, y_pred)
-    mape = mean_absolute_percentage_error(test_y_np, y_pred)
-    rms = np.sqrt(mse)
-    
-    # Print results
-    print("\n" + "="*50)
-    print("EVALUATION RESULTS")
-    print("="*50)
-    print(f"MAE:  {mae:.6f}")
-    print(f"MSE:  {mse:.6f}")
-    print(f"RMSE: {rms:.6f}")
-    print(f"MAPE: {mape:.4f}%")
-    print("="*50)
-    
-    if args.use_augmentation:
-        print(f"Training completed with {args.aug_type} data augmentation")
-        print(f"Augmentation probability: {args.aug_probability}")
-    else:
-        print("Training completed without data augmentation")
+# Example usage:
+# Define opposite points for mirroring (example for human pose)
+# opposite_points = [(0, 1), (2, 3), (4, 5), ...]  # pairs of joints that are mirrors of each other
 
-if __name__ == "__main__":
-    main()
+# Initialize model with augmentation
+# model = SGCN_LSTM(AD, AD2, bias_mat_1, bias_mat_2, num_joints, 
+#                   opposite_points=opposite_points, enable_augmentation=True)
