@@ -665,18 +665,18 @@ class SGCN_LSTM_VAE(nn.Module):
                 losses.append(main_loss.item())
             
             # Print training progress (inside epoch loop)
-            if use_augmented_data and len(augmented_losses) > 0:
-                avg_aug_loss = np.mean(augmented_losses)
-                if self.use_vae_augmentation and len(vae_losses) > 0:
-                    print(f"Epoch {epoch+1}/{epochs}, Main Loss: {np.mean(losses):.4f}, "
-                          f"Augmented Loss: {avg_aug_loss:.4f}, VAE Loss: {np.mean(vae_losses):.4f}")
-                else:
-                    print(f"Epoch {epoch+1}/{epochs}, Main Loss: {np.mean(losses):.4f}, "
-                          f"Augmented Loss: {avg_aug_loss:.4f}")
-            elif self.use_vae_augmentation and len(vae_losses) > 0:
-                print(f"Epoch {epoch+1}/{epochs}, Main Loss: {np.mean(losses):.4f}, VAE Loss: {np.mean(vae_losses):.4f}")
-            else:
-                print(f"Epoch {epoch+1}/{epochs}, Loss: {np.mean(losses):.4f}")
+            #if use_augmented_data and len(augmented_losses) > 0:
+            #    avg_aug_loss = np.mean(augmented_losses)
+            #    if self.use_vae_augmentation and len(vae_losses) > 0:
+            #        print(f"Epoch {epoch+1}/{epochs}, Main Loss: {np.mean(losses):.4f}, "
+            #              f"Augmented Loss: {avg_aug_loss:.4f}, VAE Loss: {np.mean(vae_losses):.4f}")
+            #    else:
+            #        print(f"Epoch {epoch+1}/{epochs}, Main Loss: {np.mean(losses):.4f}, "
+            #              f"Augmented Loss: {avg_aug_loss:.4f}")
+            #elif self.use_vae_augmentation and len(vae_losses) > 0:
+            #    print(f"Epoch {epoch+1}/{epochs}, Main Loss: {np.mean(losses):.4f}, VAE Loss: {np.mean(vae_losses):.4f}")
+            #else:
+            print(f"Epoch {epoch+1}/{epochs}, Loss: {np.mean(losses):.4f}")
     
     def predict(self, test_x):
         self.eval()
